@@ -53,20 +53,20 @@ More details about the module **circuit_main.py**:
 - **training()** executes the training of the quantum neural network. It returns the optimised parameters, the approximated target matrix, and the total cost.
 
 The loss functions utilised are defined as follows:
-- **traceDistanceLoss(Y_ideal, predictions)** calculates the trace distance between the ideal and synthesized density matrices. Y_ideal is the list of ideal density matrices and predictions is the list of calculated predictions: $||\rho - \sigma||_1 = \text{Tr}\sqrt{(\rho - \sigma)^\dag (\rho - \sigma)}$
+- **traceDistanceLoss(Y_ideal, predictions)** calculates the trace distance between the ideal and synthesized density matrices. Y_ideal is the list of ideal density matrices and predictions is the list of calculated predictions: $||\rho - \sigma||_1 = \text{Tr}\sqrt{(\rho - \sigma)^\dagger (\rho - \sigma)}$
 - **fidelityLoss(Y_ideal, predictions, dev)** calculates the fidelity between the ideal and synthesized density matrices: $F(\rho,\sigma) = (\text{Tr}\sqrt{\sqrt{\rho}\sigma \sqrt{\rho}})^2 $
 - **hellinger(prob1, prob2)** calculates the Hellinger distance between 2 probabilities distribution. It works only if the device is set to "hw";
-- **frobeniusLoss(params, x_max, SU_ideal, rot_count, VQC, U_ideal, dev, n_qubit)** calculates the Frobenius Norm between the ideal unitary matrix and the synthesized one: $||{A}_F|| = \sqrt{\text{Tr}(A^\dag A)}$
-- **qfastLoss(params, x_max, SU_ideal, rot_count, VQC, dev, n_qubit)** calculates the loss QFAST proposed in the paper arXiv:2003.04462 between the ideal unitary matrix and the one synthesized by the QNN: $\Delta(U_C,U_T ) = 1 - \frac{|\text{Tr}(U_T^\dag U_C)|}{d}$, where $U_C$ and $U_T$ are the ideal unitary matrix and the target unitary matrix respectively;
-- **hilbert_schmidt_inner_product(U, V)** calculates the Hilbert-Schmidt inner product between two operators U and V: $F_{HS} = \frac{1}{d}\Re(\text{Tr}(A^\dag B))$
+- **frobeniusLoss(params, x_max, SU_ideal, rot_count, VQC, U_ideal, dev, n_qubit)** calculates the Frobenius Norm between the ideal unitary matrix and the synthesized one: $||{A}_F|| = \sqrt{\text{Tr}(A^\dagger A)}$
+- **qfastLoss(params, x_max, SU_ideal, rot_count, VQC, dev, n_qubit)** calculates the loss QFAST proposed in the paper arXiv:2003.04462 between the ideal unitary matrix and the one synthesized by the QNN: $\Delta(U_C,U_T ) = 1 - \frac{|\text{Tr}(U_T^\dagger U_C)|}{d}$, where $U_C$ and $U_T$ are the ideal unitary matrix and the target unitary matrix respectively;
+- **hilbert_schmidt_inner_product(U, V)** calculates the Hilbert-Schmidt inner product between two operators U and V: $F_{HS} = \frac{1}{d}\Re(\text{Tr}(A^\dagger B))$
 - **operator_norm(U, V)** calculates the Operator Norm between two operators U and V: $||{A}|| = \sup_{||{\psi}||=1} ||{A\psi}||$. **This loss metric currently does not work: it does not calculate the descending gradient properly and needs to be fixed**;
 - **choi_matrix(U)** calculates the Choi matrix implementation of a unitary operator U. This function is used in the Choi Trace Distance loss to compute two Choi matrices and calculate their distance;
 - **choi_trace_distance(U, V)** calculates the Choi Trace Distance between two Choi matrices U and V: $D_{\text{tr}}(U, V) = \frac{1}{2} ||J(U) - J(V)||_1$, where $J(U)$ and $J(V)$ are the corresponding Choi matrix representation of operators U and V. **This loss metric currently does not work: it does not calculate the descending gradient properly and needs to be fixed**;
-- **geodetic_distance(U, V)** calculates the Geodetic Distance between two operators U and V: $D_{\text{geo}}(U, V) = \arccos (\frac{1}{d}|\text{Tr}(U^\dag V)|)$
-- **average_gate_fidelity(U, V)** calculates the Average Gate Fidelity between two operators U and V: $\overline{F}(U, \mathcal{V}) = \frac{|\text{Tr}(U^\dag V)|^2+d}{d(d+1)}$
+- **geodetic_distance(U, V)** calculates the Geodetic Distance between two operators U and V: $D_{\text{geo}}(U, V) = \arccos (\frac{1}{d}|\text{Tr}(U^\dagger V)|)$
+- **average_gate_fidelity(U, V)** calculates the Average Gate Fidelity between two operators U and V: $\overline{F}(U, \mathcal{V}) = \frac{|\text{Tr}(U^\dagger V)|^2+d}{d(d+1)}$
 - **opfidelity(U, V)** calculates the Operator Fidelity between two operators U and V:
-$F(U, V) = \frac{1}{d^2} \left| \text{Tr}(U^\dag V) \right|^2$
-- **bures_distance(U, V)** calculates the Bures Distance between two operators U and V: $D_B(U, V) = \sqrt{1 - \frac{1}{d^2}|\text{Tr}(U^\dag V)^2|}$
+$F(U, V) = \frac{1}{d^2} \left| \text{Tr}(U^\dagger V) \right|^2$
+- **bures_distance(U, V)** calculates the Bures Distance between two operators U and V: $D_B(U, V) = \sqrt{1 - \frac{1}{d^2}|\text{Tr}(U^\dagger V)^2|}$
 - **state_induced_distance(U, V, psi)** calculates the State Induced Distance between two operators U and V. A statevector $\ket{\psi}$ is created as to calculate the distance between the two modified operators: $d_{\psi}(U, V) = ||U\ket{\psi}-V\ket{\psi}||$. **This loss metric currently does not work: it does not calculate the descending gradient properly and needs to be fixed**.
 
 More details about the module **USynthesis_circuitNgeneral.py**:
