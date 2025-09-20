@@ -1,5 +1,8 @@
 # Approximate Gate Synthesis with the Standard Recursive Block Basis (SRBB) decomposition (v1.0.0)
 
+## Acknowledgements
+
+We acknowledge financial support from the European Union - NextGenerationEU, PNRR MUR project PE0000023-NQSTI.
 
 ## Description
 
