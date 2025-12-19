@@ -4,9 +4,14 @@ import pennylane as qml
 #from qiskit import *
 #from qiskit_ibm_runtime import QiskitRuntimeService
 
+n_qubit = None
+device_type = None
+device = None
+
 def set_device(n_qubit: int, device_type: str ='sim'):
     if device_type == 'sim':
         dev = qml.device('default.qubit', wires = n_qubit)
+        device = dev
     
     #elif device_type == 'hw':
         # Or save your credentials on disk.

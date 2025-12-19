@@ -1,10 +1,12 @@
+#SRBB-SYNTHESIS CIRCUIT_MAIN.PY, v1.1.0
+
 #Main script to run the approximate synthesis algorithm designed on SRBB decomposition.
 #The algorithm uses a QNN to approximate unitary operators and the corresponding VQC is based on the SRBB decomposition.
 #The scalable VQC is optimized in terms of CNOTs.
 #This script covers simulation and execution on real hardware with different metrics.
 
 import USynthesis_circuitNgeneral as USC
-from config import set_device
+import config
 import importlib
 import inspect
 import matplotlib.pyplot as plt
@@ -20,12 +22,10 @@ import time
 import os
 import re
 import csv
+import sys
+from unitary_generation import generators, checks, io_utils, hamiltonians
 from scipy.stats import unitary_group
 from scipy.linalg import svdvals
-
-from qiskit import quantum_info
-
-
 """
 HW device import
 #from qiskit.quantum_info.analysis import hellinger_fidelity
@@ -49,38 +49,46 @@ def get_args():
 	parser.add_argument('--batch_size', type = int, default = 64, help = 'number of elements in each batch')
 	parser.add_argument('--lr', type = float, default = 0.01, help = 'learning rate')
 	parser.add_argument('--opt', type = str, default = 'Adam', choices = ['Adam', 'Nelder_Mead'], help = 'optimizer used for training')
-	parser.add_argument('--loss', type = str, default = 'trace_distance', choices = ['trace_distance', 'frob', 'fidelity', 'sup_norm', 'qfast', 'hilbert', 'opnorm', 'choi', 'geodetic', 'avg_fidelity', 'opfidelity', 'bures', 'sid'], help = 'loss function')
+	parser.add_argument('--loss', type = str, default = 'trace_distance', choices = ['trace_distance', 'frob', 'fidelity', 'qfast', 'hilbert', 'opnorm', 'geodetic', 'avg_fidelity', 'opfidelity', 'bures'], help = 'loss function')
 	parser.add_argument('--num_samples', type = int, default = 1000, help = "if trace of fidelity losses are used, you can set the number of states for the training set")
 	parser.add_argument('--test_size', type = int, default = 500, help = "size of the test set")
-	parser.add_argument('--unitary', type = str, nargs = '+', default = None, help = 'name of the VQC to approximate, refer to ideal_circuit modules')
+	parser.add_argument('--unitary', type = str, nargs = '+', default = None, help = 'name of the VQC to approximate')
 	parser.add_argument('--num_random', type = int, default = 1, help = "how many random unitaries you want to test")
 	#parser.add_argument('--num_layer', type = int, default = 1, choices = range(1, 10), help = 'number of repetitions of the VQC')
 	parser.add_argument('--only_test', type = bool, default = False, help = 'to select the test mode')
 	parser.add_argument('--device', type = str, default = "sim", choices = ["sim", "hw"], help = 'to choose the execution on the pennylane simulator or on ibm real hw')
 	parser.add_argument('--VQC', type = str, default = 'VQC', choices = ["VQC", 'Vidal'], help = 'parameterized quantum circuit to be executed')
 	parser.add_argument('--path', type = str, default = "", help = "where to save/load the files")
-	parser.add_argument('--newtest', type = bool, default=False, help = 'test the experimental matrices')
+	parser.add_argument('--qchem', type = bool, default=False, help = 'test the experimental matrices')
 
 	return parser.parse_args()
 
 def main(args):
-	dev = set_device(args.n, args.device) #dynamic initialization of the device
+	config.n_qubit = args.n
+	dev = config.set_device(args.n, args.device) #dynamic initialization of the device
 	print("Device:", dev)
 	print("Device type:", type(dev))
+	config.device = dev
+	config.device_type = args.device
+	USC.init(config.device, config.n_qubit)
 
-	ideal_module_name = f'ideal_circuitN{args.n}' #selection of the ideal unitary to approximate based on n
+	if args.qchem == True:
+		ideal_module_name = 'qchem_module' #select unitaries defined within the quantum chemistry unitaries module
+	else:
+		ideal_module_name = f'ideal_circuitN{config.n_qubit}' #selection of the ideal unitary to approximate based on n
+
 	ideal_module = importlib.import_module(ideal_module_name) #import the ideal module containing the premade circuits based on n
 
 	if args.unitary == None:
 		print("No unitary circuit specified!")
 		#Executes this if the --unitary param is not set in the execution command
 		#list of the function names of the ideal unitaries in the chosen module
-		circuits = [name for name, func in inspect.getmembers(ideal_module) if inspect.isfunction(func)]
+		circuits = [name for name, func in inspect.getmembers(ideal_module) if isinstance(func, qml.QNode)]
 		#executes a test with all ideal circuits in the module
 		for c in circuits:
 			print(c)
-			main_program(c, ideal_module, args, dev)
-			input()
+			#main_program(c, ideal_module, args, dev)
+		sys.exit() #exits as no unitary is chosen
 	else:
 		#otherwise approximate only the choice given by the user
 		#one or more random unitary matrices
@@ -112,7 +120,7 @@ def main_program(c, ideal_module, args, dev):
 	#define the location of the results directory and create both datasets
 	#directory of the results -> subdirectories organized by qubits, run name and unitary
 
-	results_dir=os.path.join(args.path, f"N{args.n}/{args.run_name}/{c}")
+	results_dir=os.path.join(args.path, f"N{config.n_qubit}/{args.run_name}/{c}")
 	os.makedirs(results_dir, exist_ok=True)
 	pathName = args.run_name + "_" + c
 
@@ -120,77 +128,60 @@ def main_program(c, ideal_module, args, dev):
 	X_train, X_test = create_dataset(args)
 
 	#the ideal circuit/unitary labeled by c variable (its name) as function
-	circuit = getattr(ideal_module, c)(dev, args.n)
+
+	circuit = getattr(ideal_module, c)
+	
 	print("\n" + "="*30)
 	print("[DEBUG] Examined Circuit: " + c + "\n")	
 	print("\n[DEBUG] STEP 1: UNITARY MATRIX GENERATION\n")	
 	#create a/an random/empty unitary matrix for the circuit function
-	#if the newtest flag is true, it executes the unitary matrices related to quantum chemistry
+	#if the qchem flag is true, it executes the unitary matrices related to quantum chemistry
 	if c == 'random':
-		#initialize U matrix to n=2 phys matrix
-		if args.newtest==True and args.n == 2:
-			U = np.array([
-				[0.7669 + 0.6402j,       0,                 0,             -0.0267 + 0.0356j],
-				[0,               0.8062 + 0.5242j,   0.2280 - 0.1526j,     0],
-				[0,               0.2280 - 0.1526j,   0.1768 + 0.9452j,     0],
-				[-0.0267 + 0.0356j,       0,                 0,             0.8288 + 0.5578j]
-			], dtype=complex)
-			print("[INFO] Using static target matrix for experimental testing.")
-			identity = np.eye(U.shape[0])
-			check = np.allclose(U @ U.conj().T, identity)
-			if check:
-				print("[INFO] The random target matrix is unitary.")
-			else:
-				print("\n[WARNING] The random target matrix is NOT unitary!\n")
-
-			print("[INFO] The target matrix is:\n")
-			format_matrix(U)
-			print("\n" + "="*30 + "\n")
-		#initialize U matrix to n=3 phys matrix
-		elif args.newtest==True and args.n == 3:
-			theta = np.pi / 2
-			cos2t = np.cos(2 * theta)
-			isin2t = 1j * np.sin(2 * theta)
-
-			U = np.array([
-				[1,       0,       0,       0,       0,       0,       0,       0],
-				[0,       1,       0,       0,       0,       0,       0,       0],
-				[0,       0,   cos2t,       0,       0, -isin2t,       0,       0],
-				[0,       0,       0,   cos2t, -isin2t,       0,       0,       0],
-				[0,       0,       0, -isin2t,   cos2t,       0,       0,       0],
-				[0,       0, -isin2t,       0,       0,   cos2t,       0,       0],
-				[0,       0,       0,       0,       0,       0,       1,       0],
-				[0,       0,       0,       0,       0,       0,       0,       1]
-			], dtype=complex)
-
-			print("\n" + "="*30)
-			print("[INFO] Using static target matrix for experimental testing.")
-			# unitary check
-			identity = np.eye(U.shape[0])
-			check = np.allclose(U @ U.conj().T, identity)
-			if check:
-				print("[INFO] The target matrix is unitary.")
-			else:
-				print("\n[WARNING] The target matrix is NOT unitary!\n")
-		
-			print("[INFO] The target matrix is:\n")
-			format_matrix(U)
-			print("\n" + "="*30 + "\n")
-		else:
-			U = unitary_group.rvs(2**args.n)
+		U = unitary_group.rvs(2**config.n_qubit)
 	else:
-		U = np.empty(shape = (2**args.n, 2**args.n), dtype=complex)
+		U = np.empty(shape = (2**config.n_qubit, 2**config.n_qubit), dtype=complex)
 
 	#return the ideal density matrix generated by the circuit (random or predefined) for each training sample
 	#initialise the circuit with the respective U matrix, then compute all of the ideal density matrices
 	y_ideal = []
-	if args.newtest==True:
-		y_ideal = [circuit(x, U, args.device) for x in X_train]
+	if args.qchem == True:
+		if c == 'predefined':
+			#enters this branch when selecting predefined as the unitary, as it is needed to load the hamiltonian matrix
+			print("List of predefined hamiltonians:\n")
+			hlist = hamiltonians.getList()
+			for h in hlist:
+				print(h)
+			funcname = input("\nName of the predefined hamiltonian matrix to import (CASE-SENSITIVE): ").strip()
+			U = hamiltonians.generate_unitary(funcname)
+			"""
+			if os.path.exists(filename):
+				H = io_utils.load_npy(filename)
+				print("Loaded File\n")
+			else:
+				print(f"Error: file '{filename}' does not exist.")
+			"""
+			if checks.is_unitary(U):
+				print("\n[INFO] The target matrix is unitary.")
+				"""
+				save_choice = input("Save matrix? (y/n): ").strip().lower()
+				if save_choice == "y":
+					filename = input("Insert filename (no extension): ").strip()
+					io_utils.save_npy(filename, U)
+					print(f"Matrix saved as {filename}.npy")
+				"""
+			else:
+				print("[INFO] The target matrix is NOT unitary!")
+		else:
+			print("[INFO] Proceeding with specified ideal unitary.")
+		y_ideal = [circuit(x, U) for x in X_train]
+		print("[INFO] The target matrix is:\n")
+		format_matrix(U)
+		print("\n" + "="*30 + "\n")
 	else:
 		for i, x in enumerate(X_train):
 			if i == 0:
 				# Execute only on the first iteration, initialises the ideal U
-				_ = circuit(x, U, args.device)  
+				_ = circuit(x, U)  
 				identity = np.eye(U.shape[0])
 				check = np.allclose(U @ U.conj().T, identity)
 				if check:
@@ -202,13 +193,13 @@ def main_program(c, ideal_module, args, dev):
 					print("\n" + "="*30)
 					print("\n[WARNING] The target matrix is NOT unitary!\n")
 					print("\n" + "="*30)
-			y_ideal.append(circuit(x, U, args.device))
+			y_ideal.append(circuit(x, U))
 
 	#save the target matrix U in a param file
 	with open(os.path.join(results_dir, f'U_target_{pathName}.pkl'), 'wb') as f:
 		pickle.dump(U, f)
 	
-	
+
 	#calculate the determinant of the unitary that we want to approximate
 	print("[DEBUG] STEP 2: SU GENERATION\n")	
 	det = np.linalg.det(U)
@@ -217,10 +208,10 @@ def main_program(c, ideal_module, args, dev):
 
 	#calculate the 2^n roots of the determinant, related to the 2^n possible SU
 	z = sp.symbols('z', complex=True)
-	equation = z**(2**args.n) - det 
+	equation = z**(2**config.n_qubit) - det 
 	solutions = sp.solve(equation, z)
 	solutions = [complex(sol.evalf()) for sol in solutions] #convert to complex number after calculating the numeric value
-	print("[INFO] Roots of det(U) and associated phases")
+	print("\n[INFO] Roots of det(U) and associated phases")
 	print("\nRoots of det(U):", solutions)
 
 	#sorting the roots (unitary cfr counterclockwise starting from 0 radiant)
@@ -253,7 +244,7 @@ def main_program(c, ideal_module, args, dev):
 	#save all the ideal SU
 	with open(os.path.join(results_dir, pathName + "_SU_Results.txt"), "a") as file:
 		file.write("Examined unitary: " + c + "\n")
-		file.write("Number of qubits: " + str(args.n) + "\n")
+		file.write("Number of qubits: " + str(config.n_qubit) + "\n")
 		file.write("Loss algorithm: " + args.loss + "\n")
 		file.write("Training algorithm: " + args.opt + "\n")
 		#file.write("Number of layers: " + str(args.num_layer) + "\n")
@@ -262,7 +253,7 @@ def main_program(c, ideal_module, args, dev):
 		file.write("Number of samples: " + str(args.num_samples) + "\n")
 		file.write("Batch size: " + str(args.batch_size) + "\n")
 		file.write("Test size: " + str(args.test_size) + "\n")
-		file.write("Experimental Matrix: " + str(args.newtest) + "\n")
+		file.write("Experimental Matrix: " + str(args.qchem) + "\n")
 		file.write("Type of circuit: " + str(args.VQC) + "\n")
 		file.write("\nDeterminant: " + str(det) + "\n")
 		file.write("\nSorted roots: \n")
@@ -275,7 +266,7 @@ def main_program(c, ideal_module, args, dev):
 			file.write("Associated root: " + str(solutions[idx]) + "\n")
 			file.write("\n")
 		
-	x_max=2**(args.n-1)-1 #number of ProdT_factors and M_factors
+	x_max=2**(config.n_qubit-1)-1 #number of ProdT_factors and M_factors
 
 	if args.only_test == False:
 		"""
@@ -285,9 +276,9 @@ def main_program(c, ideal_module, args, dev):
 		#execute the training
 		start_time = time.time()
 		#the ideal U is given as argument because the vidal circuit for two qubit is used for unitary matrices and not for SU
-		params, U_approx, loss, norm, SU_approx, SU_ideal, rot_count = training(X_train, y_ideal, args.batch_size, args.lr, args.epochs, args.loss, args.opt,
-																				#args.num_layer,
-																				args.n, solutions, listSU, listSU[0], x_max, args.VQC, U, dev, c, pathName)
+		params, U_approx, loss, norm, SU_approx, SU_ideal, rot_count = training(X_train, y_ideal, args.batch_size, args.lr, args.epochs, args.loss, args.opt, 
+																		  		#num_layer,
+																				solutions, listSU, listSU[0], x_max, args.VQC, U, c, pathName)
 		end_time = time.time()
 		elapsed_time = end_time - start_time
 		elapsed_time = str(round(elapsed_time, 3))
@@ -295,8 +286,7 @@ def main_program(c, ideal_module, args, dev):
 		print("\n[BEGIN TEST MODE]\n")
 		print("[TEST MODE] Loading saved matrices for comparison...\n")
 
-		#Rebuild pathname
-		#ORIGINAL pathName = args.run_name + c + 'LR' + str(args.lr) + args.opt + str(args.num_samples) + "BS" + str(args.batch_size)
+		#Rebuild pathname as defined above
 		pathName = args.run_name + "_" + c
 		result_dir = results_dir
 		os.makedirs(result_dir, exist_ok=True)
@@ -311,18 +301,18 @@ def main_program(c, ideal_module, args, dev):
 		
 		#Calculate comparison metrics
 		frob = np.linalg.norm(U_target - U_approx, ord='fro')
-		fid = np.abs(np.trace(np.dot(np.conj(U_target.T), U_approx))) / (2 ** args.n)
+		fid = np.abs(np.trace(np.dot(np.conj(U_target.T), U_approx))) / (2 ** config.n_qubit)
 		trace_dist = 0.5 * np.trace(scipy.linalg.sqrtm((U_target - U_approx).conj().T @ (U_target - U_approx))).real
 		hilbert = hilbert_schmidt_inner_product(U_target, U_approx)
 		op_norm = operator_norm(U_target, U_approx)
-		choi = choi_trace_distance(U_target, U_approx)
+		#choi = choi_trace_distance(U_target, U_approx)
 		geo = geodetic_distance(U_target, U_approx)
 		gate_fid = average_gate_fidelity(U_target, U_approx)
 		bures = bures_distance(U_target, U_approx)
 		ofid = opfidelity(U_target, U_approx)
 		psi = np.zeros(U_target.shape[0], dtype=complex)
 		psi[0] = 1.0
-		sid = state_induced_distance(U_target, U_approx, psi)
+		#sid = state_induced_distance(U_target, U_approx, psi)
 
 		metrics = {
         "Frobenius": frob,
@@ -330,12 +320,10 @@ def main_program(c, ideal_module, args, dev):
         "Trace Distance": trace_dist,
 		"Hilbert-Schmidt Inner Product": hilbert,
     	"Operator Norm": op_norm,
-    	"Choi Trace Distance": choi,
     	"Geodetic Distance": geo,
     	"Average Gate Fidelity": gate_fid,
 		"Operator Fidelity": ofid,
 		"Bures Distance": bures,
-		"State induced distance": sid,
     	}
 		
 		print("\n[TEST MODE] Loss metrics:\n")
@@ -350,28 +338,24 @@ def main_program(c, ideal_module, args, dev):
 		with open(os.path.join(results_dir, pathName + '_Metrics.txt'), "a") as file:
 			file.write("\n" + "="*30 + "\n")
 			file.write("Examined unitary: " + c + "\n")
-			file.write("Number of qubits: " + str(args.n) + "\n")
+			file.write("Number of qubits: " + str(config.n_qubit) + "\n")
 			file.write("\nExamined Metrics:\n")
 			for k, v in metrics.items():
 				file.write(f"{k}: {v:.6f}\n")
 
 		print("\n[END TEST MODE]\n")	
-		return  # End test mode
+		return
 	
 
 	print("\n[DEBUG] STEP 4: LOSS CALCULATION\n")
 	#create one random state to do a test
-	real_part = np.random.normal(size=2**args.n)
-	imag_part = np.random.normal(size=2**args.n)
+	real_part = np.random.normal(size=2**config.n_qubit)
+	imag_part = np.random.normal(size=2**config.n_qubit)
 	random_complex_vector = real_part + 1j * imag_part
 
 	#normalize the vector
 	norm = np.linalg.norm(random_complex_vector)
 	normalized_vector = random_complex_vector / norm
-
-
-	dist = quantum_info.diamond_norm(quantum_info.Choi(SU_approx) - quantum_info.Choi(SU_ideal))
-
 
 	#save the results in the general results file
 	if args.only_test == False:
@@ -383,7 +367,7 @@ def main_program(c, ideal_module, args, dev):
 		with open(os.path.join(results_dir, pathName + '_Results.txt'), "a") as file:
 			file.write("\n" + "="*30 + "\n")
 			file.write("Examined unitary: " + c + "\n")
-			file.write("Number of qubits: " + str(args.n) + "\n")
+			file.write("Number of qubits: " + str(config.n_qubit) + "\n")
 			file.write("Loss algorithm: " + args.loss + "\n")
 			file.write("Training algorithm: " + args.opt + "\n")
 			#file.write("Number of layers: " + str(args.num_layer) + "\n")
@@ -393,7 +377,7 @@ def main_program(c, ideal_module, args, dev):
 			file.write("Batch size: " + str(args.batch_size) + "\n")
 			file.write("Test size: " + str(args.test_size) + "\n")
 			file.write("Type of circuit: " + str(args.VQC) + "\n")
-			file.write("Experimental Matrix: " + ("yes" if args.newtest else "no") + "\n")
+			file.write("Experimental Matrix: " + ("yes" if args.qchem else "no") + "\n")
 			file.write("Training time: " + str(elapsed_time) + ' seconds')
 			file.write("\nIDEAL U:\n")
 			file.write(format_matrix_str(U))
@@ -403,8 +387,6 @@ def main_program(c, ideal_module, args, dev):
 			file.write(str(loss))	
 			file.write("\nNORM: \n")
 			file.write(str(norm))
-			file.write("\nDiamond Norm: ")
-			file.write(str(dist)) 
 		
 	if args.device == "sim":
 		print("[INFO] TESTING VECTOR")
@@ -415,17 +397,17 @@ def main_program(c, ideal_module, args, dev):
 			file.write("\nTESTING VECTOR:\n")
 			file.write(str(normalized_vector))
 
-		#based on if the circuit trained is the VQC or the Vidal one, calculate the density matrix associated
+		#based on if the circuit trained is the VQC or the Vidal one, calculate the associated density matrix
 		if args.VQC == 'VQC':
-			dm_synt = USC.make_circuit_qnode(dev, args.n)([], x_max, rot_count, normalized_vector, U_approx)[2]
+			dm_synt = USC.circuit([], x_max, rot_count, normalized_vector, U_approx)[2]
 		elif args.VQC == 'Vidal':
-			dm_synt = USC.make_vidal_qnode(dev, args.n)([], x_max, rot_count, normalized_vector, U_approx)[2]
+			dm_synt = USC.vidal([], x_max, rot_count, normalized_vector, U_approx)[2]
 		
 		#if the loss is the frobenius norm, calculate the trace distance between ideal density matrix and the one of the VQC
 		if args.loss == 'frob':
 			print("\n[INFO] TRACE DISTANCE between ideal and synth density matrix")
 			
-			dm_ideal = circuit(normalized_vector, U, args.device)
+			dm_ideal = circuit(normalized_vector, U)
 			print(qml.math.trace_distance(dm_synt, dm_ideal))
 
 			with open(os.path.join(results_dir, pathName + '_Results.txt'), "a") as file:
@@ -445,7 +427,7 @@ def main_program(c, ideal_module, args, dev):
 				file.write(str(np.real(np.trace(np.dot(Msub, Msub_H)) ** 0.5)))
 
 		#return the amplitude encoded density matrix
-		dm_amp = USC.make_amplitude_density_qnode(dev, args.n)(normalized_vector)
+		dm_amp = USC.amplitude_density(normalized_vector)
 
 		#calculate the ideal density matrix comprising encoding and circuit and calculate the evolution
 		dm_final_ideal = U @ dm_amp @ (np.conj(U)).T
@@ -458,9 +440,9 @@ def main_program(c, ideal_module, args, dev):
 			file.write(str(qml.math.trace_distance(dm_synt, dm_final_ideal)))
 		
 		if args.VQC == 'VQC':
-			state, probs, rho = USC.make_circuit_qnode(dev, args.n)([], x_max, rot_count, normalized_vector, U_approx)
+			state, probs, rho = USC.circuit([], x_max, rot_count, normalized_vector, U_approx)
 		elif args.VQC == 'Vidal':
-			state, probs, rho = USC.make_vidal_qnode(dev, args.n)([], x_max, rot_count, normalized_vector, U_approx)
+			state, probs, rho = USC.vidal([], x_max, rot_count, normalized_vector, U_approx)
 		print("\n[INFO] Synthesized statevector:")
 		print(state)
 		print("\n[INFO] Synthesized probabilities:")
@@ -471,14 +453,14 @@ def main_program(c, ideal_module, args, dev):
 
 
 	print("\n[DEBUG] STEP 5: LOSS EVALUATION AND ERROR RATE\n")
-	#testing dataset, calculate the trace distance between ideal output state and the one produced by the VQC
+	#testing dataset, calculate the trace distance between ideal density matrix and the synthesized one
 	error_in_test = 0
 	for x in X_test:
-		dm_ideal = circuit(x, U, args.device)
+		dm_ideal = circuit(x, U)
 		if args.VQC == 'VQC':
-			dm_synt = USC.make_circuit_qnode(dev, args.n)([], x_max, rot_count, x, U_approx)[2]
+			dm_synt = USC.circuit([], x_max, rot_count, x, U_approx)[2]
 		elif args.VQC == 'Vidal':
-			dm_synt = USC.make_vidal_qnode(dev, args.n)([], x_max, rot_count, x, U_approx)[2]
+			dm_synt = USC.vidal([], x_max, rot_count, x, U_approx)[2]
 		if args.device == "sim":
 			error_in_test += qml.math.trace_distance(dm_synt, dm_ideal)
 		elif args.device == "hw":
@@ -574,8 +556,8 @@ def create_dataset(args):
 	X_train = []
 	for i in range(args.num_samples):
 		#step 1: generate random complex vectors
-		real_part = np.random.normal(size=2**args.n)
-		imag_part = np.random.normal(size=2**args.n)
+		real_part = np.random.normal(size=2**config.n_qubit)
+		imag_part = np.random.normal(size=2**config.n_qubit)
 		random_complex_vector = real_part + 1j * imag_part
 
 		#step 2: normalize the vector
@@ -586,8 +568,8 @@ def create_dataset(args):
 	X_test = []
 	for i in range(args.test_size):
 		#step 1: generate random complex vectors
-		real_part = np.random.normal(size=2**args.n)
-		imag_part = np.random.normal(size=2**args.n)
+		real_part = np.random.normal(size=2**config.n_qubit)
+		imag_part = np.random.normal(size=2**config.n_qubit)
 		random_complex_vector = real_part + 1j * imag_part
 
 		#step 2: normalize the vector
@@ -639,6 +621,10 @@ def format_matrix(matrix, decimals=3):
 def format_matrix_str(matrix, decimals=3):
     """
     Return a formatted string of a complex matrix with aligned columns.
+	
+	Parameters:
+        matrix (np.ndarray): the matrix to format
+        decimals (int): number of decimals to show
     """
     rows = []
     for row in matrix:
@@ -707,7 +693,7 @@ def hellinger(prob1, prob2):
 	distance = (1/np.sqrt(2)) * np.sqrt(np.sum((np.sqrt(prob1) - np.sqrt(prob2))**2))
 	return distance
 
-def frobeniusLoss(params, x_max, SU_ideal, rot_count, VQC, U_ideal, dev, n_qubit):
+def frobeniusLoss(params, x_max, SU_ideal, rot_count, VQC, U_ideal):
 	"""
 	Calculates the frobenius Norm between the ideal matrix and the one produced by the VQC
 
@@ -723,14 +709,14 @@ def frobeniusLoss(params, x_max, SU_ideal, rot_count, VQC, U_ideal, dev, n_qubit
 	"""
 
 	if VQC == 'VQC':
-		Msub = SU_ideal - qml.matrix(USC.make_circuit_qnode(dev, n_qubit), wire_order=range(0, n_qubit))(params, x_max, rot_count)
+		Msub = SU_ideal - qml.matrix(USC.circuit, wire_order=range(0, config.n_qubit))(params, x_max, rot_count)
 	elif VQC == 'Vidal':
-		Msub = U_ideal - qml.matrix(USC.make_vidal_qnode(dev, n_qubit))(params, x_max, rot_count)
+		Msub = U_ideal - qml.matrix(USC.vidal)(params, x_max, rot_count)
 	Msub_H = (np.conj(Msub)).T
 	
 	return np.real(np.trace(np.dot(Msub, Msub_H)) ** 0.5)
 
-def qfastLoss(params, x_max, SU_ideal, rot_count, VQC, dev, n_qubit):
+def qfastLoss(params, x_max, SU_ideal, rot_count, VQC):
 	"""
 	Calculates the qfast paper loss between the ideal matrix and the one produced by the VQC
 
@@ -744,9 +730,9 @@ def qfastLoss(params, x_max, SU_ideal, rot_count, VQC, dev, n_qubit):
 	return loss: the qfast loss value 
 	"""
 	if VQC == 'VQC':
-		matrix = qml.matrix(USC.make_circuit_qnode(dev, n_qubit), wire_order=range(0, n_qubit))(params, x_max, rot_count)
+		matrix = qml.matrix(USC.circuit, wire_order=range(0, config.n_qubit))(params, x_max, rot_count)
 	elif VQC == 'Vidal':
-		matrix = qml.matrix(USC.make_vidal_qnode(dev, n_qubit))(params, x_max, rot_count)
+		matrix = qml.matrix(USC.vidal)(params, x_max, rot_count)
 
 	trace = np.trace(np.conj(matrix).T @ SU_ideal)
 	loss = qml.math.sqrt(1 - (abs(trace) ** 2) / (SU_ideal.shape[0] ** 4))
@@ -764,46 +750,50 @@ def hilbert_schmidt_inner_product(U, V):
 	return np.real(np.trace(np.dot(np.conj(U.T), V))) / d
 
 def operator_norm(U, V):
-	"""
-	Calculates the Operator Norm (spectral norm) between two operators.
-	The function needs to be made differentiable, currently it does not optimise the parameters correctly.
+    """
+    Differentiable spectral norm between two operators.
 
 	Parameters:
 		U, V: two unitary operators
-	"""
-	V = qml.math.toarray(V)
-	return svdvals(U - V)[0]
+    """
+    diff = U - V
+    s = np.linalg.svd(diff, compute_uv=False)
+    return s[0]
 
+"""
 def choi_matrix(U):
-	"""
-	Calculates the corresponding Choi matrix of a given operator U.
+	
+	#Calculates the corresponding Choi matrix of a given operator U.
 
-	Parameters:
-		U: unitary operator
-	"""
+	#Parameters:
+		#U: unitary operator
 	d = U.shape[0]
 	psi = np.eye(d).reshape(d * d, 1) / np.sqrt(d)  # maximally entangled state (unnormalized ket)
 	U_kron = np.kron(U, np.eye(d))
 	psi_out = U_kron @ psi
-	return psi_out @ psi_out.conj().T  # density matrix
-    
-def choi_trace_distance(U, V):
-	"""
-	Calculates the Quantum channel distance via Choi matrices (trace distance).
-	The function needs to be made differentiable, currently it does not optimise the parameters correctly.
+	return psi_out @ np.conj(psi_out).T  # density matrix
+"""
+"""
+def choi_trace_distance(U, V, eps=0.0):
 
-	Parameters:
-		U, V: two choi matrices
-	"""
-	#convert input autograd arraybox into a numpy array
-	#in turn, this conversion makes the function non differentiable, however it does not function correctly without it
-	V = qml.math.toarray(V)
-	C1 = choi_matrix(U)
-	C2 = choi_matrix(V)
-	diff = C1 - C2
-	diff =  qml.math.toarray(diff)
-	evals = np.linalg.eigvalsh(diff)
-	return 0.5 * np.sum(np.abs(evals))
+    #Trace distance between two Choi matrices using singular values.
+    #Returns 0.5 * ||C1 - C2||_1 with all ops backend-safe.
+    #eps: valore piccolo per stabilizzare la somma radici se vuoi una versione smoothed.
+
+    C1 = choi_matrix(U)
+    C2 = choi_matrix(V)
+    diff = C1 - C2
+
+    # usa la SVD del backend e prendi SOLO i valori singolari
+    s = np.linalg.svd(diff, compute_uv=False)  # dovrebbe restituire un ArrayBox differenziabile
+
+    if eps == 0.0:
+        # norma di traccia esatta
+        return 0.5 * np.sum(s)
+    else:
+        # versione lievemente smoothed: sum sqrt(s_i^2 + eps)
+        return 0.5 * np.sum(np.sqrt(s ** 2 + eps))
+"""
 
 def geodetic_distance(U, V):
 	"""
@@ -844,20 +834,22 @@ def bures_distance(U, V):
 	F = opfidelity(U, V)
 	return np.sqrt(1 - F)
 
+"""
 def state_induced_distance(U, V, psi):
-	"""
-	Calculates the euclidean distance ||U|psi⟩ - V|psi⟩|| between two evolutions of
-	the psi state.
 	
-	Parameters:
-		U, V: unitary operators (d x d)
-		psi: status vector (d)
-    """
+	#Calculates the euclidean distance ||U|psi⟩ - V|psi⟩|| between two evolutions of
+	#the psi state.
+	
+	#Parameters:
+		#U, V: unitary operators (d x d)
+		#psi: status vector (d)
+    
 	Up = U @ psi
 	Vp = V @ psi
 	return np.linalg.norm(Up - Vp)
+"""
 
-def cost(params, X, Y_ideal, n_qubit, loss, SU_ideal, VQC, x_max, rot_count, U_ideal, dev):
+def cost(params, X, Y_ideal, loss, SU_ideal, VQC, x_max, rot_count, U_ideal):
 	"""
 	Choose which cost function to calculate, defined by the --loss parameter specified in the command line.
 	This function is called inside the network training function.
@@ -866,22 +858,20 @@ def cost(params, X, Y_ideal, n_qubit, loss, SU_ideal, VQC, x_max, rot_count, U_i
 		params: List of theta parameters that are trained
 		X: the analysed dataset
 		Y_ideal: the ideal density matrices
-		n_qubit: number of qubits
 		loss: which loss to use
 		SU_ideal: the ideal SU matrix
 		VQC: type of variational circuit: the SRBB VQC or the 2 qubit circuit of Vidal
 		x_max: 
 		rot_count: number of rotations
 		U_ideal: the approximated matrix
-		dev: device used, sim or hw
 
 	return loss: the loss value 
 	"""
 	if loss == 'trace_distance' or loss == 'fidelity':
 		if VQC == 'VQC':
-			predictions = [USC.make_circuit_qnode(dev, n_qubit)(params, x_max, rot_count, X[i]) for i in range(len(X))]
+			predictions = [USC.circuit(params, x_max, rot_count, X[i]) for i in range(len(X))]
 		elif VQC == 'Vidal':
-			predictions = [USC.make_vidal_qnode(dev, n_qubit)(params, x_max, rot_count, X[i]) for i in range(len(X))]
+			predictions = [USC.vidal(params, x_max, rot_count, X[i]) for i in range(len(X))]
 
 		predictions, states, probs = zip(*predictions)
 		predictions, states, probs = list(predictions), list(states), list(probs)
@@ -890,63 +880,63 @@ def cost(params, X, Y_ideal, n_qubit, loss, SU_ideal, VQC, x_max, rot_count, U_i
 		elif loss == 'fidelity':
 			return fidelityLoss(Y_ideal, predictions)
 	elif loss == 'frob':
-		return frobeniusLoss(params, x_max, SU_ideal, rot_count, VQC, U_ideal, dev, n_qubit)
+		return frobeniusLoss(params, x_max, SU_ideal, rot_count, VQC, U_ideal)
 	elif loss == 'qfast':
-		return qfastLoss(params, x_max, SU_ideal, rot_count, VQC, dev, n_qubit)
+		return qfastLoss(params, x_max, SU_ideal, rot_count, VQC)
 	elif loss == 'hilbert':
 		if VQC == 'VQC':
-			approx = qml.matrix(USC.make_circuit_qnode(dev, n_qubit))(params, x_max, rot_count)
+			approx = qml.matrix(USC.circuit, wire_order=range(0, config.n_qubit))(params, x_max, rot_count)
 		elif VQC == 'Vidal':
-			approx = qml.matrix(USC.make_vidal_qnode(dev, n_qubit))(params, x_max, rot_count)
+			approx = qml.matrix(USC.vidal)(params, x_max, rot_count)
 		return 1 - hilbert_schmidt_inner_product(SU_ideal, approx)
 	elif loss == 'opnorm':
 		if VQC == 'VQC':
-			approx = qml.matrix(USC.make_circuit_qnode(dev, n_qubit))(params, x_max, rot_count)
+			approx = qml.matrix(USC.circuit, wire_order=range(0, config.n_qubit))(params, x_max, rot_count)
 		elif VQC == 'Vidal':
-			approx = qml.matrix(USC.make_vidal_qnode(dev, n_qubit))(params, x_max, rot_count)
+			approx = qml.matrix(USC.vidal)(params, x_max, rot_count)
 		return operator_norm(SU_ideal, approx)
-	elif loss == 'choi':
-		if VQC == 'VQC':
-			approx = qml.matrix(USC.make_circuit_qnode(dev, n_qubit))(params, x_max, rot_count)
-		elif VQC == 'Vidal':
-			approx = qml.matrix(USC.make_vidal_qnode(dev, n_qubit))(params, x_max, rot_count)
-		return choi_trace_distance(SU_ideal, approx)
+	#elif loss == 'choi':
+		#if VQC == 'VQC':
+			#approx = qml.matrix(USC.circuit, wire_order=range(0, config.n_qubit))(params, x_max, rot_count)
+		#elif VQC == 'Vidal':
+			#approx = qml.matrix(USC.vidal)(params, x_max, rot_count)
+		#return choi_trace_distance(SU_ideal, approx)
 	elif loss == 'geodetic':
 		if VQC == 'VQC':
-			approx = qml.matrix(USC.make_circuit_qnode(dev, n_qubit))(params, x_max, rot_count)
+			approx = qml.matrix(USC.circuit, wire_order=range(0, config.n_qubit))(params, x_max, rot_count)
 		elif VQC == 'Vidal':
-			approx = qml.matrix(USC.make_vidal_qnode(dev, n_qubit))(params, x_max, rot_count)
+			approx = qml.matrix(USC.vidal)(params, x_max, rot_count)
 		return geodetic_distance(SU_ideal, approx)
 	elif loss == 'avg_fidelity':
 		if VQC == 'VQC':
-			approx = qml.matrix(USC.make_circuit_qnode(dev, n_qubit))(params, x_max, rot_count)
+			approx = qml.matrix(USC.circuit, wire_order=range(0, config.n_qubit))(params, x_max, rot_count)
 		elif VQC == 'Vidal':
-			approx = qml.matrix(USC.make_vidal_qnode(dev, n_qubit))(params, x_max, rot_count)
+			approx = qml.matrix(USC.vidal)(params, x_max, rot_count)
 		return 1 - average_gate_fidelity(SU_ideal, approx)
 	elif loss == 'bures':
 		if VQC == 'VQC':
-			approx = qml.matrix(USC.make_circuit_qnode(dev, n_qubit))(params, x_max, rot_count)
+			approx = qml.matrix(USC.circuit, wire_order=range(0, config.n_qubit))(params, x_max, rot_count)
 		elif VQC == 'Vidal':
-			approx = qml.matrix(USC.make_vidal_qnode(dev, n_qubit))(params, x_max, rot_count)
+			approx = qml.matrix(USC.vidal)(params, x_max, rot_count)
 		return bures_distance(SU_ideal, approx)
 	elif loss == 'opfidelity':
 		if VQC == 'VQC':
-			approx = qml.matrix(USC.make_circuit_qnode(dev, n_qubit))(params, x_max, rot_count)
+			approx = qml.matrix(USC.circuit, wire_order=range(0, config.n_qubit))(params, x_max, rot_count)
 		elif VQC == 'Vidal':
-			approx = qml.matrix(USC.make_vidal_qnode(dev, n_qubit))(params, x_max, rot_count)
+			approx = qml.matrix(USC.vidal)(params, x_max, rot_count)
 		return 1 - opfidelity(SU_ideal, approx)
-	elif loss == 'sid':
-		psi = np.zeros(2 ** n_qubit, dtype=complex)
-		psi[0] = 1.0  # |0...0>
-		if VQC == 'VQC':
-			approx = qml.matrix(USC.make_circuit_qnode(dev, n_qubit))(params, x_max, rot_count)
-		elif VQC == 'Vidal':
-			approx = qml.matrix(USC.make_vidal_qnode(dev, n_qubit))(params, x_max, rot_count)
-		return state_induced_distance(SU_ideal, approx, psi)
+	#elif loss == 'sid':
+		#psi = np.zeros(2 ** config.n_qubit, dtype=complex)
+		#psi[0] = 1.0  # |0...0>
+		#if VQC == 'VQC':
+			#approx = qml.matrix(USC.circuit, wire_order=range(0, config.n_qubit))(params, x_max, rot_count)
+		#elif VQC == 'Vidal':
+			#approx = qml.matrix(USC.vidal)(params, x_max, rot_count)
+		#return state_induced_distance(SU_ideal, approx, psi)
 
-def training(X_train, Y_ideal, batch_size, learning_rate, epochs, loss, optimizer,
-			 #num_layer,
-			 n_qubit, listdet, listSU, SU_ideal, x_max, VQC, U_ideal, dev, circuit, pathName):	
+def training(X_train, Y_ideal, batch_size, learning_rate, epochs, loss, optimizer, 
+			#num_layer,
+			listdet, listSU, SU_ideal, x_max, VQC, U_ideal, circuit, pathName):	
 	"""
 	Execute the training of the neural network.
 
@@ -959,14 +949,12 @@ def training(X_train, Y_ideal, batch_size, learning_rate, epochs, loss, optimize
 		loss: which loss function to use
 		optimizer: which optimizer to use (Adam or Nelder_Mead)
 		num_layer: number of layers to be used by the VQC
-		n_qubit: number of qubits
 		listdet: list of determinants of the different 2^n possibilities of SU
 		listSU: list of all possible SU
 		SU_ideal: the ideal SU
 		x_max:
 		VQC: which VQC to use (Vidal or SRBB)
 		U_ideal: the ideal U
-		dev: device used
 		circuit: which circuit to approximate
 		pathName: String. Name given by the options chosen in arguments
 
@@ -981,7 +969,7 @@ def training(X_train, Y_ideal, batch_size, learning_rate, epochs, loss, optimize
 	"""
 	last_params = None
 	last_update_time = time.time()
-	stall_time_limit = 60
+	stall_time_limit = 300
 
 	best_params = None
 	best_loss = None
@@ -992,18 +980,18 @@ def training(X_train, Y_ideal, batch_size, learning_rate, epochs, loss, optimize
 	print("\n" + "="*30)
 	print("\n[DEBUG] STEP 3: NETWORK TRAINING\n")
 	print("[BEGIN NETWORK TRAINING]")
-	results_dir=os.path.join(args.path, f"N{args.n}/{args.run_name}/{circuit}")
+	results_dir=os.path.join(args.path, f"N{config.n_qubit}/{args.run_name}/{circuit}")
 	os.makedirs(results_dir, exist_ok=True)
 
 	def callback(params):
 		nonlocal last_params, last_update_time, best_params, best_loss	
-		#print(f"Norm(params): {np.linalg.norm(params)}")
+		print(f"Norm(params): {np.linalg.norm(params)}")
 
 		try:
 			if loss == 'frob':
-				current_loss = frobeniusLoss(params, x_max, SU_ideal, rot_count, VQC, U_ideal, dev, n_qubit)
+				current_loss = frobeniusLoss(params, x_max, SU_ideal, rot_count, VQC, U_ideal)
 			else:
-				current_loss = cost(params, X_train, Y_ideal, n_qubit, loss, SU_ideal, VQC, x_max, rot_count, U_ideal, dev)
+				current_loss = cost(params, X_train, Y_ideal, config.n_qubit, loss, SU_ideal, VQC, x_max, rot_count, U_ideal)
 		except Exception as e:
 			print(f"[WARNING] Impossibile calcolare la loss nella callback: {e}")
 			current_loss = None
@@ -1030,7 +1018,7 @@ def training(X_train, Y_ideal, batch_size, learning_rate, epochs, loss, optimize
 			last_update_time = time.time()
 			
 	if VQC == 'VQC':
-		params, rot_count = USC.Theta_array_gen(x_max, n_qubit)
+		params, rot_count = USC.Theta_array_gen(x_max)
 	elif VQC == 'Vidal':
 		params = np.random.randn(15, requires_grad = True)
 		rot_count = [15]
@@ -1047,11 +1035,11 @@ def training(X_train, Y_ideal, batch_size, learning_rate, epochs, loss, optimize
 		try:
 			print("\n[TRAINING] Optimizing parameters with NELDER MEAD")
 			if loss == 'frob':
-				params = scipy.optimize.fmin(func=frobeniusLoss, x0=params, args=(x_max, SU_ideal, rot_count, VQC, U_ideal, dev, n_qubit), callback=callback, xtol=10**(-15), ftol=10**(-15), maxiter=10**10,maxfun=10**20)
+				params = scipy.optimize.fmin(func=frobeniusLoss, x0=params, args=(x_max, SU_ideal, rot_count, VQC, U_ideal), callback=callback, xtol=10**(-15), ftol=10**(-15), maxiter=10**10,maxfun=10**20)
 			elif loss == 'trace_distance':
-				params = scipy.optimize.fmin(func=cost, x0=params, args=(X_train, Y_ideal, n_qubit, loss, SU_ideal, VQC, x_max, rot_count, U_ideal, dev), callback=callback, xtol=10**(-6), ftol=10**(-6), maxiter=10**10,maxfun=10**20)
+				params = scipy.optimize.fmin(func=cost, x0=params, args=(X_train, Y_ideal, loss, SU_ideal, VQC, x_max, rot_count, U_ideal), callback=callback, xtol=10**(-6), ftol=10**(-6), maxiter=10**10,maxfun=10**20)
 			else:
-				params = scipy.optimize.fmin(func=cost, x0=params, args=(X_train, Y_ideal, n_qubit, loss, SU_ideal, VQC, x_max, rot_count, U_ideal, dev), callback=callback, xtol=10**(-6), ftol=10**(-6), maxiter=10**10,maxfun=10**20)
+				params = scipy.optimize.fmin(func=cost, x0=params, args=(X_train, Y_ideal, loss, SU_ideal, VQC, x_max, rot_count, U_ideal), callback=callback, xtol=10**(-6), ftol=10**(-6), maxiter=10**10,maxfun=10**20)
 		except EarlyStopException:
 			print("[INFO] Optimization interrupted: stalled\n")
 			if best_params is not None:
@@ -1060,9 +1048,9 @@ def training(X_train, Y_ideal, batch_size, learning_rate, epochs, loss, optimize
 		cost_new = 0.0
 
 		if VQC == 'VQC':
-			SU_approx = qml.matrix(USC.make_circuit_qnode(dev, n_qubit))(params, x_max, rot_count)
+			SU_approx = qml.matrix(USC.circuit)(params, x_max, rot_count)
 		elif VQC == 'Vidal':
-			U_approx = qml.matrix(USC.make_vidal_qnode(dev, n_qubit))(params, x_max, rot_count)
+			U_approx = qml.matrix(USC.vidal)(params, x_max, rot_count)
 			SU_approx = U_approx
 
 		print("\n" + "="*30)
@@ -1087,19 +1075,19 @@ def training(X_train, Y_ideal, batch_size, learning_rate, epochs, loss, optimize
 					Y_batch = [Y_ideal[i] for i in range(b, len(X_train))]
 					
 				if optimizer == 'Adam':
-					params, cost_new = opt.step_and_cost(lambda v: cost(v, X_batch, Y_batch, n_qubit, loss, SU_ideal, VQC, x_max, rot_count, U_ideal, dev), params)
+					params, cost_new = opt.step_and_cost(lambda v: cost(v, X_batch, Y_batch, loss, SU_ideal, VQC, x_max, rot_count, U_ideal), params)
 
 			print("------------------------------\n")
 			print(f"Cost (loss): {cost_new}\n")
 			if VQC == 'VQC':
 				print(f"[MATRIX] SU_approx after EPOCH {e+1}")
 				print(f"------------------------------\n")
-				SU_approx = qml.matrix(USC.make_circuit_qnode(dev, n_qubit))(params, x_max, rot_count)
+				SU_approx = qml.matrix(USC.circuit, wire_order=range(0, config.n_qubit))(params, x_max, rot_count)
 				format_matrix(SU_approx)
 			elif VQC == 'Vidal':
 				print(f"[MATRIX] U_approx after EPOCH {e+1}")
 				print(f"------------------------------\n")
-				U_approx = qml.matrix(USC.make_vidal_qnode(dev, n_qubit))(params, x_max, rot_count)
+				U_approx = qml.matrix(USC.vidal)(params, x_max, rot_count)
 				SU_approx = U_approx
 				format_matrix(U_approx)
 			
@@ -1124,12 +1112,10 @@ def training(X_train, Y_ideal, batch_size, learning_rate, epochs, loss, optimize
 	DELTA = []
 
 	for SU in listSU:
-		# in DELTA, it writes the result of the subtraction operation between every SU and the approx SU deriving from the vqc
 		DELTA.append(SU - SU_approx)
 
 	norm = []
 	for d in DELTA:
-		#writes in norm the square root of the maximum eigenvalue of the tensor product between matrix d and its adjoint
 		norm.append(cmath.sqrt(max(np.linalg.eig(((np.conj(d)).T) @ d)[0]))) 
 		
 	print("[INFO] Spectral norm distance between each ideal SU and SU_approx\n")
@@ -1142,7 +1128,7 @@ def training(X_train, Y_ideal, batch_size, learning_rate, epochs, loss, optimize
 		U_approx = SU_approx * listdet[best_index]
 		if loss == 'frob':
 			U_approx = SU_approx * listdet[0]
-		print(f"\n[INFO] Approximate Unitary:")
+		print(f"\n[INFO] Approximate Unitary:\n")
 		format_matrix(U_approx)
 
 	

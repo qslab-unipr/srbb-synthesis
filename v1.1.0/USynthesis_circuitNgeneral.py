@@ -1,30 +1,40 @@
 import pennylane as qml
 from pennylane import numpy as pnp
 import numpy as np
-import os
 import matplotlib.pyplot as plt
 from pennylane.templates.embeddings import AmplitudeEmbedding
+import config
 #from pennylane_qiskit.remote import RemoteDevice
 
 #Software implementation of the new CNOT-reduced scalability scheme for the algorithm proposed by Sarkar et al. (arXiv:2405.00012) about approximate unitary synthesis.
 
+n_qubit = config.n_qubit
+dev = qml.device('default.qubit', wires = n_qubit)
+
+def init(d, n):
+	global n_qubit, dev
+	dev = d
+	n_qubit = n
+
 #0307177
-def make_vidal_qnode(dev, n_qubit):
-    @qml.qnode(dev)
-    def vidal(params, x_max, rot_count, x = [], U_approx = []):
-        if len(U_approx) == 0:
-            if len(x) != 0:
-                AmplitudeEmbedding(x, range(n_qubit), normalize = True)
-                vidalCircuit(params)
-            if len(x) == 0:
-                return qml.density_matrix(range(n_qubit))
-            else:
-                return qml.density_matrix(range(n_qubit)), qml.state(), qml.probs(range(n_qubit))
-        else:
+@qml.qnode(dev)
+def vidal(params, x_max, rot_count, x = [], U_approx = []):
+    if len(U_approx) == 0:
+        if len(x) != 0:
             AmplitudeEmbedding(x, range(n_qubit), normalize = True)
-            qml.QubitUnitary(U_approx, wires = range(n_qubit))
-            return qml.state(), qml.probs(range(n_qubit)), qml.density_matrix(range(n_qubit))
-    return vidal
+
+        vidalCircuit(params)  
+
+        if len(x) == 0:
+            return qml.density_matrix(range(n_qubit))
+        else:
+           return qml.density_matrix(range(n_qubit)), qml.state(), qml.probs(range(n_qubit))       
+    
+    else:
+        AmplitudeEmbedding(x, range(n_qubit), normalize = True)
+        qml.QubitUnitary(U_approx, wires = range(n_qubit))
+
+        return qml.state(), qml.probs(range(n_qubit)), qml.density_matrix(range(n_qubit))
 
 def vidalCircuit(params):
 	
@@ -59,80 +69,72 @@ def vidalCircuit(params):
 	qml.QubitUnitary(np.linalg.inv((np.eye(2) -1j*qml.PauliX.compute_matrix())/qml.math.sqrt(2)), wires = 1)
     """
 
-def make_circuit_qnode(dev, n_qubit):
-	#fpath = "circuit_draw.png"
-	#print("DEBUG in factory → dev è QNodeDevice?", isinstance(dev, qml.devices.Device))
-	#assert isinstance(dev, qml.devices.Device), f"Invalid device: {type(dev)}"
-	@qml.qnode(dev)
-	def circuit(params, x_max, rot_count, x = [], U_approx = []):
-		#The scalability scheme for ProdT_factors is based on the binary matrix which has as rows the binary representation of numbers from 1 to x_max.
-		#This implementation takes into account the reduction in the CNOT-number thanks to a new simplification scheme. 
-		#The scalability scheme for M_factors is based on the binary matrix built by Gray Code.
-		#This implementation does not reduce the number of rotations (future work).
+@qml.qnode(dev)
+def circuit(params, x_max, rot_count, x = [], U_approx = []):
+	#The scalability scheme for ProdT_factors is based on the binary matrix which has as rows the binary representation of numbers from 1 to x_max.
+	#This implementation takes into account the reduction in the CNOT-number thanks to a new simplification scheme. 
+	#The scalability scheme for M_factors is based on the binary matrix built by Gray Code.
+	#This implementation does not reduce the number of rotations (future work).
+	
+	#print('\nx_max={}'.format(x_max))
+	binary_matrix=np.empty(shape=(x_max,n_qubit-1),dtype=int)
+	for i in range(1,x_max+1):
+		#print('Binary number for {}'.format(i))
+		binary_number_array = dec_bin(i,n_qubit-1)
+		binary_matrix[i-1]=binary_number_array
+	binary_matrix_reverse=np.flip(binary_matrix,0)	#According to the circuit-wise order, the first element is ProdTxmax
+	#print('\nBinary matrix where the ones indicate the target qubits of a CNOT gate:\n')
+	#print(format_matrix(binary_matrix))
+	#print('\nBinary matrix with rows flipped:\n')
+	#print(format_matrix(binary_matrix_reverse))
 
-		#print('\nx_max={}'.format(x_max))
-		binary_matrix=np.empty(shape=(x_max,n_qubit-1),dtype=int)
-		for i in range(1,x_max+1):
-			#print('Binary number for {}'.format(i))
-			binary_number_array = dec_bin(i,n_qubit-1,n_qubit)
-			binary_matrix[i-1]=binary_number_array
-		binary_matrix_reverse=np.flip(binary_matrix,0)	#According to the circuit-wise order, the first element is ProdTxmax
-		#print('\nBinary matrix where the ones indicate the target qubits of a CNOT gate:\n')
-		#print(format_matrix(binary_matrix))
-		#print('\nBinary matrix with rows flipped:\n')
-		#print(format_matrix(binary_matrix_reverse))
+	control_target_pairs = CNOTgate_indices_even(binary_matrix)
 
-		control_target_pairs = CNOTgate_indices_even(binary_matrix, n_qubit)
+	k_array = Find_k(binary_matrix_reverse, x_max)
 
-		k_array = Find_k(binary_matrix_reverse, x_max, n_qubit)
+	simpli_matrix_even, simpli_count = Simplification_matrix_even(binary_matrix_reverse, x_max)
 
-		simpli_matrix_even, simpli_count = Simplification_matrix_even(binary_matrix_reverse, x_max, n_qubit)
+	simpli_matrix_odd, simpli_count, double_count = Simplification_matrix_odd(binary_matrix_reverse, x_max)
 
-		simpli_matrix_odd, simpli_count, double_count = Simplification_matrix_odd(binary_matrix_reverse, x_max, n_qubit)
+	Gray_matrix_collection = Gray_matrix(n_qubit-1,False)
 
-		Gray_matrix_collection = Gray_matrix(n_qubit-1,False)
-
-		simpli_Gray_collection = Simplification_Gray_matrix(Gray_matrix_collection, n_qubit)
+	simpli_Gray_collection = Simplification_Gray_matrix(Gray_matrix_collection)
 
 	
 
-		if len(U_approx) == 0:
-			if len(x) != 0:
-				AmplitudeEmbedding(x, range(n_qubit), normalize = True)
-				#qml.Barrier(wires = [0, 1])
-			SU_approx_circuit(params, binary_matrix_reverse, k_array, simpli_matrix_even, simpli_matrix_odd, simpli_Gray_collection, x_max, rot_count, n_qubit)
-			#if not os.path.exists(fpath):
-					#qml.draw_mpl(SU_approx_circuit)(params, binary_matrix_reverse, k_array, simpli_matrix_even, simpli_matrix_odd, simpli_Gray_collection, x_max, rot_count, n_qubit)
-					#plt.savefig(fpath)
-			#qml.draw_mpl(SU_approx_circuit)(params, binary_matrix_reverse, k_array, simpli_matrix_even, simpli_matrix_odd, simpli_Gray_collection, x_max, rot_count, n_qubit)
-			#plt.show()
-			#input("A")
-
-			if len(x) == 0:
-				return qml.density_matrix(range(n_qubit))
-			else:
-				return qml.density_matrix(range(n_qubit)), qml.state(), qml.probs(range(n_qubit))
-
-		else: #testing
+	if len(U_approx) == 0:
+		if len(x) != 0:
 			AmplitudeEmbedding(x, range(n_qubit), normalize = True)
-			qml.QubitUnitary(U_approx, wires = range(n_qubit))
-			#if isinstance(dev, RemoteDevice):
-			#	return qml.counts(wires = range(n_qubit)), qml.counts(wires =range(n_qubit)), qml.probs(range(n_qubit))
-			#else:
-			return qml.state(), qml.probs(range(n_qubit)), qml.density_matrix(range(n_qubit))
-	
-
-		#qml.draw_mpl(SU_approx_circuit)(params, binary_matrix_reverse, k_array, simpli_matrix_even, simpli_matrix_odd, simpli_Gray_collection, x_max)
+			#qml.Barrier(wires = [0, 1])
+		SU_approx_circuit(params, binary_matrix_reverse, k_array, simpli_matrix_even, simpli_matrix_odd, simpli_Gray_collection, x_max, rot_count)
+		
+		#qml.draw_mpl(SU_approx_circuit)(params, binary_matrix_reverse, k_array, simpli_matrix_even, simpli_matrix_odd, simpli_Gray_collection, x_max, rot_count)
 		#plt.show()
-	
-	return circuit
-
-def make_amplitude_density_qnode(dev, n_qubit):
-	@qml.qnode(dev)
-	def amplitude_density(x):
+		#input("A")
+		
+		if len(x) == 0:
+			return qml.density_matrix(range(n_qubit))
+		else:
+			return qml.density_matrix(range(n_qubit)), qml.state(), qml.probs(range(n_qubit))
+		
+	else: #testing
 		AmplitudeEmbedding(x, range(n_qubit), normalize = True)
-		return qml.density_matrix(range(n_qubit))
-	return amplitude_density
+		qml.QubitUnitary(U_approx, wires = range(n_qubit))
+		#if isinstance(dev, RemoteDevice):
+			#return qml.counts(wires = range(n_qubit)), qml.counts(wires =range(n_qubit)), qml.probs(range(n_qubit))
+		#else:
+		return qml.state(), qml.probs(range(n_qubit)), qml.density_matrix(range(n_qubit))
+	
+
+	#qml.draw_mpl(SU_approx_circuit)(params, binary_matrix_reverse, k_array, simpli_matrix_even, simpli_matrix_odd, simpli_Gray_collection, x_max)
+	#plt.show()
+
+
+
+@qml.qnode(dev)
+def amplitude_density(x):
+    AmplitudeEmbedding(x, range(n_qubit), normalize = True)
+    return qml.density_matrix(range(n_qubit))
 
 #Format useful for checks
 def format_matrix(matrix):
@@ -140,7 +142,7 @@ def format_matrix(matrix):
 	return M
 
 #Decimal to binary with units on the right
-def dec_bin(decimal_number, bit_number, n_qubit):
+def dec_bin(decimal_number, bit_number):
 	binary_number_list=[]
 	if decimal_number==0:
 		binary_number_list=[0]*bit_number
@@ -164,32 +166,32 @@ def dec_bin(decimal_number, bit_number, n_qubit):
 	return np.array(binary_number_list)
 
 #CNOTs, with appropriate parameters, are the building blocks for ProdT_factors
-def CNOTgate_even(position_ones, n_qubit):
+def CNOTgate_even(position_ones):
 	qml.CNOT(wires=[n_qubit-1,position_ones])
 
 #There are differences in the parameter settings between even and odd cases
-def CNOTgate_odd(position_k, n_qubit):
+def CNOTgate_odd(position_k):
 	qml.CNOT(wires=[position_k,n_qubit-1])
 
 #Scalability scheme for the whole sequence ProdT_factors_even 
-def AllProdT_gatesequence_even(binary_matrix_reverse, n_qubit):
+def AllProdT_gatesequence_even(binary_matrix_reverse):
 	for i in range(binary_matrix_reverse.shape[0]):
 			for j in range(binary_matrix_reverse.shape[1]):
 				if binary_matrix_reverse[i][j]==1:
-					CNOTgate_even(j, n_qubit)
+					CNOTgate_even(j)
 			qml.Identity(n_qubit-1)#Only used to separate different ProdT_factors_even
 
 #Structure of a single ProdT_factor_even 
-def ProdT_gatesequence_even(binary_array, n_qubit):
+def ProdT_gatesequence_even(binary_array):
 	cnot_count_even1=0
 	for i in range(len(binary_array)):
 				if binary_array[i]==1:
-					CNOTgate_even(i, n_qubit)
+					CNOTgate_even(i)
 					cnot_count_even1+=1
 	return cnot_count_even1
 
 #List of control-target pairs for ProdT_factors_even
-def CNOTgate_indices_even(binary_matrix, n_qubit):
+def CNOTgate_indices_even(binary_matrix):
 	control_target_pairs=[]
 	for i in range(binary_matrix.shape[0]):
 			pairs_for_row=[]
@@ -204,7 +206,7 @@ def CNOTgate_indices_even(binary_matrix, n_qubit):
 
 
 #Parameter for ProdT_factors_odd that represents the main difference from the even case
-def Find_k(binary_matrix_reverse, x_max, n_qubit):
+def Find_k(binary_matrix_reverse, x_max):
 	k_array=np.empty(shape=(x_max),dtype=int)
 	for i in range(x_max):
 		for j in range(n_qubit-1):
@@ -218,29 +220,29 @@ def Find_k(binary_matrix_reverse, x_max, n_qubit):
 
 
 #Scalability scheme for the whole sequence ProdT_factors_odd
-def AllProdT_gatesequence_odd(binary_matrix_reverse, k_array, n_qubit):
+def AllProdT_gatesequence_odd(binary_matrix_reverse, k_array):
 	for i in range(binary_matrix_reverse.shape[0]):
-			CNOTgate_odd(k_array[i], n_qubit)
+			CNOTgate_odd(k_array[i])
 			for j in range(binary_matrix_reverse.shape[1]):
 				if binary_matrix_reverse[i][j]==1:
-					CNOTgate_even(j, n_qubit)
-			CNOTgate_odd(k_array[i], n_qubit)
+					CNOTgate_even(j)
+			CNOTgate_odd(k_array[i])
 			qml.Identity(3)#Only used to separate different ProdT_factors_odd
 
 #Structure of a single ProdT_factor_odd
-def ProdT_gatesequence_odd(binary_array, k_array_element, k_array, n_qubit):
+def ProdT_gatesequence_odd(binary_array, k_array_element, k_array):
 	cnot_count_odd1,cnot_count_even1=0,0
-	CNOTgate_odd(k_array[k_array_element], n_qubit)
+	CNOTgate_odd(k_array[k_array_element])
 	for j in range(len(binary_array)):
 		if binary_array[j]==1:
-			CNOTgate_even(j, n_qubit)
+			CNOTgate_even(j)
 			cnot_count_even1+=1
-	CNOTgate_odd(k_array[k_array_element], n_qubit)
+	CNOTgate_odd(k_array[k_array_element])
 	cnot_count_odd1=cnot_count_even1+2
 	return cnot_count_odd1
 
 #Inside ProdT_factors_even, CNOT parameters and number of simplifications depend on this matrix  
-def Simplification_matrix_even(binary_matrix_reverse, x_max, n_qubit):
+def Simplification_matrix_even(binary_matrix_reverse, x_max):
 	simpli_matrix_even=np.empty(shape=(x_max-1,n_qubit-1),dtype=int)
 	simpli_count=0
 	for i in range(x_max-1):
@@ -261,7 +263,7 @@ def Simplification_matrix_even(binary_matrix_reverse, x_max, n_qubit):
 
 
 #Inside ProdT_factors_odd, CNOT parameters and number of simplificatrions depend on this matrix
-def Simplification_matrix_odd(binary_matrix_reverse, x_max, n_qubit):
+def Simplification_matrix_odd(binary_matrix_reverse, x_max):
 	simpli_matrix_odd=np.empty(shape=(x_max-1,n_qubit-1),dtype=int)
 	simpli_count=0
 	for i in range(x_max-1):
@@ -291,41 +293,41 @@ def Simplification_matrix_odd(binary_matrix_reverse, x_max, n_qubit):
 
 
 #Scalability scheme for the CNOT sequence of ProdT_factors_even, except for the first and the last
-def ProdT_simplified_even(simpli_matrix_even,theta_collection_PSI,simpli_Gray_collection, rot_count_PSI, n_qubit):
+def ProdT_simplified_even(simpli_matrix_even,theta_collection_PSI,simpli_Gray_collection, rot_count_PSI):
 	cnot_count_even_all=0
 	for i in range(simpli_matrix_even.shape[0]):
 		for j in range(simpli_matrix_even.shape[1]):
 			if simpli_matrix_even[i][j]==1:
-				CNOTgate_even(j, n_qubit)
+				CNOTgate_even(j)
 				cnot_count_even_all+=1
-		M_factor_even(theta_collection_PSI,i+1, simpli_Gray_collection, rot_count_PSI, n_qubit)
+		M_factor_even(theta_collection_PSI,i+1, simpli_Gray_collection, rot_count_PSI)
 	#print('\nNumber of cnot in the (simplified) sequence of ProdT_factors_even, except the first and the last: {}'.format(cnot_count_even_all))
 	return cnot_count_even_all
 
 #Scalability scheme for the CNOT sequence of ProdT_factors_odd, except for the first and the last
-def ProdT_simplified_odd(simpli_matrix_odd, theta_collection_PHI, k_array, cnot_count_odd1, simpli_matrix_even, simpli_Gray_collection, binary_matrix_reverse, rot_count_PHI, n_qubit):
+def ProdT_simplified_odd(simpli_matrix_odd, theta_collection_PHI, k_array, cnot_count_odd1, simpli_matrix_even, simpli_Gray_collection, binary_matrix_reverse, rot_count_PHI):
 	cnot_count_odd_all=0
 	for i in range(simpli_matrix_odd.shape[0]):
 		for j in range(simpli_matrix_odd.shape[1]):
 			if simpli_matrix_odd[i][j]==2:
 				cnot_count_center=0
-				CNOTgate_odd(k_array[i], n_qubit)
+				CNOTgate_odd(k_array[i])
 				for l in range(simpli_matrix_even.shape[1]):
 					if simpli_matrix_even[i][l]==1:
-						CNOTgate_even(l, n_qubit)
+						CNOTgate_even(l)
 						cnot_count_center+=1
-				CNOTgate_odd(k_array[i], n_qubit)
+				CNOTgate_odd(k_array[i])
 				cnot_count_odd_all+=cnot_count_center+2
-				M_factor_odd(theta_collection_PHI,i+1, simpli_Gray_collection, rot_count_PHI, n_qubit)
+				M_factor_odd(theta_collection_PHI,i+1, simpli_Gray_collection, rot_count_PHI)
 				break
 			elif np.all(simpli_matrix_odd[i]!=np.full((n_qubit-1),2)):
 				row_pre1=binary_matrix_reverse[i]
 				row_pre2=binary_matrix_reverse[i+1]
-				cnot_count_odd1 = ProdT_gatesequence_odd(row_pre1,i, k_array, n_qubit)
+				cnot_count_odd1 = ProdT_gatesequence_odd(row_pre1,i, k_array)
 				cnot_count_odd_all+=cnot_count_odd1
-				cnot_count_odd1 = ProdT_gatesequence_odd(row_pre2,i+1, k_array, n_qubit)
+				cnot_count_odd1 = ProdT_gatesequence_odd(row_pre2,i+1, k_array)
 				cnot_count_odd_all+=cnot_count_odd1
-				M_factor_odd(theta_collection_PHI,i+1, simpli_Gray_collection, rot_count_PHI, n_qubit)
+				M_factor_odd(theta_collection_PHI,i+1, simpli_Gray_collection, rot_count_PHI)
 				break
 	#print('\nNumber of cnot in the (simplified) sequence of ProdT_factors_odd, except the first and the last: {}'.format(cnot_count_odd_all))
 	return cnot_count_odd_all
@@ -372,7 +374,7 @@ def Gray_matrix(n_bits,side=bool):
 
 
 #Inside M_factors and ZETA_factor, CNOT parameters depend on this matrix
-def Simplification_Gray_matrix(Gray_matrix_collection, n_qubit):
+def Simplification_Gray_matrix(Gray_matrix_collection):
 	simpli_Gray_collection=[]
 	for p in range(n_qubit-1):
 		Gray_matrix_p=Gray_matrix_collection[p]
@@ -464,7 +466,7 @@ def Uniformly_CROT(simpli_Gray_matrix,rot_type,theta_array_ucr,target_wire,delet
 #theta_array_ucr.fill(np.pi/2)
 
 #Generates the total number of parameters for the circuit
-def Theta_array_gen(x_max, n_qubit):
+def Theta_array_gen(x_max):
 	#PHI FACTOR -> M_factor_odd (x_max times)
 	rot_count_Modd=0
 	if n_qubit>2:
@@ -517,7 +519,7 @@ def Theta_array_gen(x_max, n_qubit):
 
 
 #M_factors_odd definition for n>2 qubits
-def M_factor_odd(theta_collection_PHI, position_index, simpli_Gray_collection, rot_count_PHI, n_qubit):
+def M_factor_odd(theta_collection_PHI, position_index, simpli_Gray_collection, rot_count_PHI):
 	qml.RZ(theta_collection_PHI[position_index * rot_count_PHI],wires=0)
 	rot_count_pre=1
 	for i in range(n_qubit-2):
@@ -535,7 +537,7 @@ def M_factor_odd(theta_collection_PHI, position_index, simpli_Gray_collection, r
 	qml.RZ(theta_collection_PHI[position_index * rot_count_PHI + rot_count_post],wires=0)
 
 #M_factors_even definition for n>2 qubits
-def M_factor_even(theta_collection_PSI,position_index, simpli_Gray_collection, rot_count_PSI, n_qubit):
+def M_factor_even(theta_collection_PSI,position_index, simpli_Gray_collection, rot_count_PSI):
 	Uniformly_CROT(simpli_Gray_collection[n_qubit-2],3,theta_collection_PSI[position_index * rot_count_PSI + 0: position_index * rot_count_PSI + 2**(n_qubit-1)],n_qubit-1,True,True)    
 	Uniformly_CROT(simpli_Gray_collection[n_qubit-2],2,theta_collection_PSI[position_index * rot_count_PSI + 2**(n_qubit-1): position_index * rot_count_PSI + 2**(n_qubit-1)*2],n_qubit-1,True,False)
 	Uniformly_CROT(simpli_Gray_collection[n_qubit-2],3,theta_collection_PSI[position_index * rot_count_PSI + 2**(n_qubit-1)*2: position_index * rot_count_PSI + 2**(n_qubit-1)*3],n_qubit-1,False,True)
@@ -555,7 +557,7 @@ def ZETA_factor2qubits(theta_collection_ZETA,delete=bool):
 		qml.RZ(theta_collection_ZETA[2],wires=[1])
 
 #ZETA_factor definition for n>2 qubits
-def ZETA_factor(theta_collection_ZETA,simpli_Gray_collection, n_qubit):
+def ZETA_factor(theta_collection_ZETA,simpli_Gray_collection):
 	offset = 0
 	for k in range(n_qubit - 1):
 		for i in range(simpli_Gray_collection[n_qubit-2-k].shape[0]):
@@ -591,7 +593,7 @@ def ProdT1_even():
 	qml.CNOT(wires=[1,0])
 
 
-def SU_approx_circuit(params, binary_matrix_reverse, k_array, simpli_matrix_even, simpli_matrix_odd, simpli_Gray_collection, x_max, rot_count, n_qubit):
+def SU_approx_circuit(params, binary_matrix_reverse, k_array, simpli_matrix_even, simpli_matrix_odd, simpli_Gray_collection, x_max, rot_count):
 	#print(params)
 	theta_collection_PHI = params[:rot_count[0] * x_max]
 	theta_collection_PSI = params[rot_count[0] * x_max: rot_count[0] * x_max + rot_count[1] * (x_max + 1)]
@@ -643,21 +645,21 @@ def SU_approx_circuit(params, binary_matrix_reverse, k_array, simpli_matrix_even
 	else:
 		
 		#PHI_FACTOR_circuit
-		cnot_count_odd1 = ProdT_gatesequence_odd(binary_matrix_reverse[0],0, k_array, n_qubit)
+		cnot_count_odd1 = ProdT_gatesequence_odd(binary_matrix_reverse[0],0, k_array)
 		#print('\nNumber of cnot in ProdT7_odd: {}'.format(cnot_count_odd1))
-		M_factor_odd(theta_collection_PHI,0, simpli_Gray_collection, rot_count_PHI, n_qubit)       
-		cnot_count_odd_all = ProdT_simplified_odd(simpli_matrix_odd, theta_collection_PHI, k_array, cnot_count_odd1, simpli_matrix_even, simpli_Gray_collection, binary_matrix_reverse, rot_count_PHI, n_qubit)
-		cnot_count_odd1 = ProdT_gatesequence_odd(binary_matrix_reverse[x_max-1],x_max-1, k_array, n_qubit)
+		M_factor_odd(theta_collection_PHI,0, simpli_Gray_collection, rot_count_PHI)       
+		cnot_count_odd_all = ProdT_simplified_odd(simpli_matrix_odd, theta_collection_PHI, k_array, cnot_count_odd1, simpli_matrix_even, simpli_Gray_collection, binary_matrix_reverse, rot_count_PHI)
+		cnot_count_odd1 = ProdT_gatesequence_odd(binary_matrix_reverse[x_max-1],x_max-1, k_array)
 		#print('\nNumber of cnot in ProdT1_odd: {}'.format(cnot_count_odd1))
 		
 		#PSI_FACTOR_circuit
-		cnot_count_even1 = ProdT_gatesequence_even(binary_matrix_reverse[0], n_qubit)
+		cnot_count_even1 = ProdT_gatesequence_even(binary_matrix_reverse[0])
 		#print('\nNumber of cnot in ProdT7_even: {}'.format(cnot_count_even1))
-		M_factor_even(theta_collection_PSI,0, simpli_Gray_collection, rot_count_PSI, n_qubit)    
-		cnot_count_even_all = ProdT_simplified_even(simpli_matrix_even, theta_collection_PSI, simpli_Gray_collection, rot_count_PSI, n_qubit)
-		cnot_count_even1 = ProdT_gatesequence_even(binary_matrix_reverse[x_max-1], n_qubit)
+		M_factor_even(theta_collection_PSI,0, simpli_Gray_collection, rot_count_PSI)    
+		cnot_count_even_all = ProdT_simplified_even(simpli_matrix_even, theta_collection_PSI, simpli_Gray_collection, rot_count_PSI)
+		cnot_count_even1 = ProdT_gatesequence_even(binary_matrix_reverse[x_max-1])
 		#print('\nNumber of cnot in ProdT1_even: {}'.format(cnot_count_even1))
-		M_factor_even(theta_collection_PSI, simpli_matrix_even.shape[0] + 1, simpli_Gray_collection, rot_count_PSI, n_qubit)
+		M_factor_even(theta_collection_PSI, simpli_matrix_even.shape[0] + 1, simpli_Gray_collection, rot_count_PSI)
 		
 		#Uniformly_CROT(simpli_Gray_collection[n-2],3,theta_array_ucr,n-1,False,False)
 		#M_factor_odd(theta_collection_PHI,6)
@@ -665,7 +667,7 @@ def SU_approx_circuit(params, binary_matrix_reverse, k_array, simpli_matrix_even
 		
 		#ZETA_FACTOR_circuit
 		#ZETA_factor2qubits(theta_collection_ZETA,True)
-		ZETA_factor(theta_collection_ZETA,simpli_Gray_collection, n_qubit)
+		ZETA_factor(theta_collection_ZETA,simpli_Gray_collection)
 		
 	#return [qml.expval(qml.PauliZ(i)) for i in range(n_qubit)]
 
