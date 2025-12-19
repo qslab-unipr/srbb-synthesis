@@ -1,0 +1,8 @@
+pennylane==0.38.0
+qiskit==1.2.0
+cmath
+numpy
+matplotlib
+scipy
+pickle
+sympy
