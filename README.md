@@ -279,3 +279,7 @@ Each execution creates 6 initial files:
 
 The most important data, such as Machine Learning parameters, test set error, evolution rate and the type of circuit examined, is all collected into a .CSV file corresponding to the examined case (e.g. Frobenius loss with the CNOT unitary). These files are created and stored in the same directory where the results files are saved. They are ready to be used in data analysis programs to construct diagrams and tables.
 
+## License
+This project is licensed under the MIT License – see the LICENSE file for details.
+
+
